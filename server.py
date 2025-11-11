@@ -1,5 +1,6 @@
 from enum import Enum
 from typing import List, Optional, Dict, Any
+import os
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, ValidationError
@@ -84,29 +85,72 @@ class BuildGraphResponse(BaseModel):
 app = FastAPI(title="Workflow Builder Tools", version="0.1.0")
 
 
+# -------------------- 静态文件 Mock 支持 --------------------
+
+def _mock_path(*segments: str) -> str:
+    base_dir = os.path.dirname(__file__)
+    return os.path.join(base_dir, "mock_data", *segments)
+
+
+def _load_json_file(path: str, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        log_event("server", "mock_load_error", {"path": path, "error": str(e)})
+        return default
+
+
 @app.get("/tools/in_app_subscriptions", response_model=List[SubscriptionItem])
 def list_in_app_subscriptions() -> List[SubscriptionItem]:
-    # TODO: 返回应用内已订阅的三方服务列表
+    # 从静态文件返回应用内已订阅的三方服务列表
     log_event("server", "route_start", {"path": "/tools/in_app_subscriptions"})
+    raw = _load_json_file(_mock_path("in_app_subscriptions.json"), [])
     items: List[SubscriptionItem] = []
+    for it in raw:
+        try:
+            items.append(SubscriptionItem(**it))
+        except Exception:
+            continue
     log_event("server", "route_end", {"path": "/tools/in_app_subscriptions", "count": len(items)})
     return items
 
 
 @app.post("/tools/market/search", response_model=MarketSearchResponse)
 def search_market_services(req: MarketSearchRequest) -> MarketSearchResponse:
-    # TODO: 基于子任务和所需服务在市场检索服务列表
+    # 基于静态文件的市场目录进行检索
     log_event("server", "route_start", {"path": "/tools/market/search", "required_services": req.required_services})
-    resp = MarketSearchResponse(items=[])
+    catalog = _load_json_file(_mock_path("market_catalog.json"), [])
+    required_set = set(req.required_services or [])
+    matched: List[SubscriptionItem] = []
+    for it in catalog:
+        name = it.get("name")
+        resource = it.get("resource")
+        # 命中条件：服务名在 required_services，或 required 包含资源枚举字符串
+        if (name and name in required_set) or (resource and resource in required_set):
+            try:
+                matched.append(SubscriptionItem(**it))
+            except Exception:
+                continue
+    resp = MarketSearchResponse(items=matched)
     log_event("server", "route_end", {"path": "/tools/market/search", "count": len(resp.items)})
     return resp
 
 
 @app.post("/tools/market/service_info", response_model=ServiceInfoResponse)
 def get_service_info(req: ServiceInfoRequest) -> ServiceInfoResponse:
-    # TODO: 查询服务的具体信息（名称、来源、服务链接）
+    # 从静态市场目录查询服务的具体信息（名称、来源、服务链接）
     log_event("server", "route_start", {"path": "/tools/market/service_info", "service_names": req.service_names})
-    resp = ServiceInfoResponse(items=[])
+    catalog = _load_json_file(_mock_path("market_catalog.json"), [])
+    name_set = set(req.service_names or [])
+    found: List[SubscriptionItem] = []
+    for it in catalog:
+        if it.get("name") in name_set:
+            try:
+                found.append(SubscriptionItem(**it))
+            except Exception:
+                continue
+    resp = ServiceInfoResponse(items=found)
     log_event("server", "route_end", {"path": "/tools/market/service_info", "count": len(resp.items)})
     return resp
 
@@ -236,6 +280,7 @@ class LLMSplitResponse(BaseModel):
     tasks: List[Subtask]
     description: Optional[str] = None
     prompt_for_confirmation: Optional[str] = None
+    plan_text: Optional[str] = None
 
 
 @app.post("/tools/llm/split_subtasks", response_model=LLMSplitResponse)
@@ -278,8 +323,96 @@ def llm_split_subtasks(req: LLMSplitRequest) -> LLMSplitResponse:
 
     desc = data.get("description")
     prompt = data.get("prompt_for_confirmation")
-    resp = LLMSplitResponse(tasks=tasks, description=desc, prompt_for_confirmation=prompt)
+    # 服务端渲染自然语言规划
+    def render_plan_text(tasks: List[Subtask], description: Optional[str]) -> str:
+        lines = []
+        if description:
+            lines.append(f"规划概述：{description}")
+        lines.append("执行步骤：")
+        for i, t in enumerate(tasks, start=1):
+            base = f"{i}. {t.description}（节点类型：{t.type}）"
+            if t.uses_service and t.resource:
+                svc = f"；使用服务：{t.resource}{' - ' + t.service if t.service else ''}"
+                base += svc
+            lines.append(base)
+        return "\n".join(lines)
+
+    plan_text = render_plan_text(tasks, desc) if tasks else None
+    resp = LLMSplitResponse(tasks=tasks, description=desc, prompt_for_confirmation=prompt, plan_text=plan_text)
     log_event("server", "route_end", {"path": "/tools/llm/split_subtasks", "task_count": len(tasks)})
+    return resp
+
+
+# -------------------- LLM 拆分改写（依据用户反馈） --------------------
+
+class LLMSplitRefineRequest(BaseModel):
+    user_requirement: str
+    node_capabilities: Dict[str, Any]
+    feedback: str
+    previous_tasks: Optional[List[Dict[str, Any]]] = None
+    system_prompt: Optional[str] = None
+    user_prompt: Optional[str] = None
+
+
+@app.post("/tools/llm/refine_subtasks", response_model=LLMSplitResponse)
+def llm_refine_subtasks(req: LLMSplitRefineRequest) -> LLMSplitResponse:
+    log_event("server", "route_start", {"path": "/tools/llm/refine_subtasks"})
+    if not is_configured():
+        log_event("server", "llm_unconfigured", {"path": "/tools/llm/refine_subtasks"})
+        return LLMSplitResponse(tasks=[], description=None, prompt_for_confirmation=None)
+
+    system = req.system_prompt or (
+        "你是任务拆分专家。需要根据用户的自然语言反馈对现有拆分进行改写，"
+        "确保每个子任务可由单节点能力完成（Prompt、脚本、循环、RAG、API、AI能力、MCP）。"
+    )
+    previous = req.previous_tasks or []
+    caps_summary = json.dumps(req.node_capabilities, ensure_ascii=False)
+    # 构建用户提示：需求 + 能力摘要 + 现有拆分 + 反馈
+    from prompts import build_refine_split_user_prompt
+    user = req.user_prompt or build_refine_split_user_prompt(
+        req.user_requirement,
+        caps_summary,
+        req.feedback,
+        previous,
+    )
+
+    content = chat(build_messages(system, user), response_format_json=True)
+    data = safe_json_parse(content) or {}
+
+    raw_tasks = data.get("tasks") or []
+    tasks: List[Subtask] = []
+    for t in raw_tasks:
+        try:
+            tasks.append(Subtask(
+                id=str(t.get("id")),
+                type=str(t.get("type")),
+                description=str(t.get("description", "")),
+                uses_service=(t.get("resource") in ("API", "MCP", "AI能力", "RAG")),
+                service=t.get("service"),
+                resource=(t.get("resource") if t.get("resource") in ("API", "MCP", "AI能力", "RAG") else None),
+            ))
+        except Exception:
+            continue
+
+    desc = data.get("description")
+    prompt = data.get("prompt_for_confirmation")
+    # 渲染自然语言规划
+    def render_plan_text(tasks: List[Subtask], description: Optional[str]) -> str:
+        lines = []
+        if description:
+            lines.append(f"规划概述：{description}")
+        lines.append("执行步骤：")
+        for i, t in enumerate(tasks, start=1):
+            base = f"{i}. {t.description}（节点类型：{t.type}）"
+            if t.uses_service and t.resource:
+                svc = f"；使用服务：{t.resource}{' - ' + t.service if t.service else ''}"
+                base += svc
+            lines.append(base)
+        return "\n".join(lines)
+
+    plan_text = render_plan_text(tasks, desc) if tasks else None
+    resp = LLMSplitResponse(tasks=tasks, description=desc, prompt_for_confirmation=prompt, plan_text=plan_text)
+    log_event("server", "route_end", {"path": "/tools/llm/refine_subtasks", "task_count": len(tasks)})
     return resp
 
 

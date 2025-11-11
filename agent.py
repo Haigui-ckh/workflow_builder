@@ -2,9 +2,17 @@ import os
 from typing import TypedDict, List, Dict, Any, Optional
 from pathlib import Path
 
-import requests
+from tools_client import (
+    call_in_app_subscriptions,
+    call_market_search,
+    call_service_info,
+    call_generate_node_metadata,
+    call_build_graph,
+)
+from node_caps import parse_node_capabilities
+from node_matcher import assign_nodes_to_tasks
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint import MemorySaver
+# 可选的检查点：若 SQLiteSaver 不可用，则不启用持久化检查点
 from logger import log_event
 from prompts import (
     SYSTEM_CONTROLLER_PROMPT,
@@ -16,13 +24,14 @@ from prompts import (
 )
 
 
-TOOLS_BASE_URL = os.getenv("TOOLS_BASE_URL", "http://localhost:8000")
+# 工具路由基地址迁移至 tools_client 模块
 
 
 class AgentState(TypedDict, total=False):
     user_requirement: str
     tasks: List[Dict[str, Any]]
     description: str
+    plan_text: Optional[str]
     prompt_for_confirmation: str
     confirmed: bool
     required_services: List[Dict[str, Any]]
@@ -35,94 +44,7 @@ class AgentState(TypedDict, total=False):
     node_desc_path: Optional[str]
 
 
-# ---------------------- 工具调用包装 ----------------------
-
-def _get(url: str) -> Any:
-    resp = requests.get(url, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def _post(url: str, payload: Dict[str, Any]) -> Any:
-    resp = requests.post(url, json=payload, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def call_in_app_subscriptions() -> List[Dict[str, Any]]:
-    return _get(f"{TOOLS_BASE_URL}/tools/in_app_subscriptions")
-
-
-def call_market_search(required_services: List[str], from_tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    data = {"required_services": required_services, "from_tasks": from_tasks}
-    res = _post(f"{TOOLS_BASE_URL}/tools/market/search", data)
-    return res.get("items", [])
-
-
-def call_service_info(service_names: List[str], resource: Optional[str] = None) -> List[Dict[str, Any]]:
-    data = {"service_names": service_names}
-    if resource:
-        data["resource"] = resource
-    res = _post(f"{TOOLS_BASE_URL}/tools/market/service_info", data)
-    return res.get("items", [])
-
-
-def call_generate_node_metadata(subtask: Dict[str, Any]) -> Dict[str, Any]:
-    data = {"subtask": subtask}
-    res = _post(f"{TOOLS_BASE_URL}/tools/node/generate_metadata", data)
-    return res.get("metadata", {})
-
-
-def call_build_graph(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
-    data = {"nodes": nodes}
-    res = _post(f"{TOOLS_BASE_URL}/tools/node/build_graph", data)
-    return res.get("graph", {})
-
-
 # ---------------------- 拆分与节点能力 ----------------------
-
-def parse_node_capabilities(node_desc_path: Optional[str] = None) -> Dict[str, Any]:
-    path = Path(node_desc_path or (Path.cwd() / "node_desc.txt"))
-    if not path.exists():
-        # 基础能力映射（兜底）
-        return {
-            "Prompt节点": {"category": "即时可用能力"},
-            "脚本节点": {"category": "即时可用能力"},
-            "循环节点": {"category": "即时可用能力"},
-            "RAG节点": {"category": "三方服务生态", "resource": "RAG"},
-            "API节点": {"category": "三方服务生态", "resource": "API"},
-            "AI能力节点": {"category": "三方服务生态", "resource": "AI能力"},
-            "MCP节点": {"category": "三方服务生态", "resource": "MCP"},
-        }
-    content = path.read_text(encoding="utf-8")
-    caps: Dict[str, Any] = {}
-    for line in content.splitlines():
-        line = line.strip()
-        if line.startswith("-- ") and "节点" in line:
-            name = line.replace("-- ", "").split("：")[0]
-            # 粗略判断来源
-            resource = None
-            if "RAG" in name:
-                resource = "RAG"
-            elif "API" in name:
-                resource = "API"
-            elif "MCP" in name:
-                resource = "MCP"
-            elif "AI能力" in name:
-                resource = "AI能力"
-            category = "三方服务生态" if resource else "即时可用能力"
-            caps[name] = {"category": category}
-            if resource:
-                caps[name]["resource"] = resource
-    # 回填基础能力，避免遗漏
-    caps.setdefault("Prompt节点", {"category": "即时可用能力"})
-    caps.setdefault("脚本节点", {"category": "即时可用能力"})
-    caps.setdefault("循环节点", {"category": "即时可用能力"})
-    caps.setdefault("RAG节点", {"category": "三方服务生态", "resource": "RAG"})
-    caps.setdefault("API节点", {"category": "三方服务生态", "resource": "API"})
-    caps.setdefault("AI能力节点", {"category": "三方服务生态", "resource": "AI能力"})
-    caps.setdefault("MCP节点", {"category": "三方服务生态", "resource": "MCP"})
-    return caps
 
 
 def split_subtasks(user_requirement: str, caps: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -167,63 +89,86 @@ def split_subtasks(user_requirement: str, caps: Dict[str, Any]) -> List[Dict[str
 # ---------------------- 图节点函数 ----------------------
 
 def call_llm_split(user_requirement: str, caps: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        res = _post(
-            f"{TOOLS_BASE_URL}/tools/llm/split_subtasks",
-            {
-                "user_requirement": user_requirement,
-                "node_capabilities": caps,
-                "system_prompt": SYSTEM_SPLIT_PROMPT,
-                "user_prompt": build_split_user_prompt(user_requirement, summarize_caps(caps)),
-            },
-        )
-        return res
-    except Exception:
-        return {"tasks": [], "description": "", "prompt_for_confirmation": ""}
+    from tools_client import call_llm_split_subtasks
+    return call_llm_split_subtasks(
+        user_requirement,
+        caps,
+        SYSTEM_SPLIT_PROMPT,
+        build_split_user_prompt(user_requirement, summarize_caps(caps)),
+    )
+
+def call_llm_refine(user_requirement: str, caps: Dict[str, Any], feedback: str, previous_tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    # 由服务端构建更详细的改写提示词；此处传递基础上下文
+    from tools_client import call_llm_refine_subtasks
+    return call_llm_refine_subtasks(
+        user_requirement,
+        caps,
+        feedback,
+        previous_tasks,
+        SYSTEM_SPLIT_PROMPT,
+        None,
+    )
 
 def call_llm_decide_next(state: Dict[str, Any], allowed_steps: List[str]) -> Optional[str]:
-    try:
-        res = _post(
-            f"{TOOLS_BASE_URL}/tools/llm/decide_next",
-            {
-                "allowed_steps": allowed_steps,
-                "state_summary": summarize_state(state),
-                "system_prompt": SYSTEM_CONTROLLER_PROMPT,
-                "user_prompt": build_decide_user_prompt(summarize_state(state), allowed_steps),
-            },
-        )
-        return res.get("next_step")
-    except Exception:
-        return None
+    from tools_client import call_llm_decide
+    res = call_llm_decide(
+        allowed_steps,
+        summarize_state(state),
+        SYSTEM_CONTROLLER_PROMPT,
+        build_decide_user_prompt(summarize_state(state), allowed_steps),
+    )
+    return res.get("next_step")
+
+
+def _render_plan_text(tasks: List[Dict[str, Any]], description: Optional[str]) -> str:
+    lines = []
+    if description:
+        lines.append(f"规划概述：{description}")
+    lines.append("执行步骤：")
+    for i, t in enumerate(tasks, start=1):
+        base = f"{i}. {t.get('description', '')}（节点类型：{t.get('type', '')}）"
+        res = t.get("resource")
+        if t.get("uses_service") and res:
+            svc = f"；使用服务：{res}{' - ' + t.get('service') if t.get('service') else ''}"
+            base += svc
+        lines.append(base)
+    return "\n".join(lines)
 
 def node_split(state: AgentState) -> AgentState:
     log_event("agent", "node_start", {"node": "split"})
     caps = parse_node_capabilities(state.get("node_desc_path"))
-    # 先调用 LLM 进行拆分
-    llm_res = call_llm_split(state["user_requirement"], caps)
+    req_text = state.get("user_requirement") or ""
+    # 先调用 LLM 进行拆分（支持用户反馈改写）
+    feedback = state.get("user_feedback")
+    previous_tasks = state.get("tasks") or []
+    if feedback:
+        llm_res = call_llm_refine(req_text, caps, feedback, previous_tasks)  # type: ignore[name-defined]
+        log_event("agent", "split_refine", {"has_feedback": True, "prev_tasks": len(previous_tasks)})
+    else:
+        llm_res = call_llm_split(req_text, caps)
     llm_tasks = llm_res.get("tasks") or []
 
-    # 规范化返回的任务结构，并标记 uses_service
-    tasks: List[Dict[str, Any]] = []
+    # 规范化为“无偏节点”的子任务结构，仅保留描述/资源提示/服务线索
+    raw_tasks: List[Dict[str, Any]] = []
     for t in llm_tasks:
-        resource = t.get("resource")
-        uses_service = resource in ("API", "MCP", "AI能力", "RAG")
-        tasks.append({
-            "id": t.get("id") or f"task-{len(tasks)+1}",
-            "type": t.get("type") or "Prompt节点",
+        raw_tasks.append({
+            "id": t.get("id") or f"task-{len(raw_tasks)+1}",
             "description": t.get("description") or "",
-            "uses_service": uses_service,
             "service": t.get("service"),
-            "resource": resource,
+            "resource": t.get("resource"),  # 仅作为提示，不直接确定类型
         })
 
-    # 若 LLM 无结果或异常，回退到规则拆分
+    # 进行节点匹配与赋型
+    tasks: List[Dict[str, Any]] = assign_nodes_to_tasks(raw_tasks, caps) if raw_tasks else []
+
+    # 若 LLM 无结果或异常，回退到规则拆分（已带类型）
     if not tasks:
-        tasks = split_subtasks(state["user_requirement"], caps)
+        tasks = split_subtasks(req_text, caps)
 
     # 描述与提示语：优先使用 LLM 返回
     desc = llm_res.get("description") or "根据用户需求拆分为可由单个节点完成的子任务（参考节点能力）"
     prompt = llm_res.get("prompt_for_confirmation") or "已完成子任务拆分。是否继续生成工作流？请确认（是/否）。"
+    plan_text = llm_res.get("plan_text")
 
     # 评审：检查任务是否可由单节点完成、资源字段是否一致等
     review_notes = []
@@ -243,10 +188,14 @@ def node_split(state: AgentState) -> AgentState:
 
     if review_notes:
         desc = f"{desc}\n评审提示：\n- " + "\n- ".join(review_notes)
+    # 若服务端未提供 plan_text 或走了规则兜底，使用本地渲染
+    if not plan_text and tasks:
+        plan_text = _render_plan_text(tasks, desc)
 
     state.update({
         "tasks": tasks,
         "description": desc,
+        "plan_text": plan_text,
         "prompt_for_confirmation": prompt,
         "confirmed": state.get("confirmed", False),
         "status": "await_confirmation" if not state.get("confirmed") else "confirmed",
@@ -383,8 +332,9 @@ def create_app():
         checkpointer = SQLiteSaver(db_path)
         log_event("agent", "checkpoint_sqlite", {"path": db_path})
     except Exception:
-        checkpointer = MemorySaver()
-        log_event("agent", "checkpoint_memory", {})
+        # 无法启用 SQLiteSaver 时，直接使用无检查点模式
+        checkpointer = None
+        log_event("agent", "checkpoint_disabled", {})
 
     app = graph.compile(checkpointer=checkpointer)
     return app

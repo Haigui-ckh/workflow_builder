@@ -32,12 +32,13 @@
 - `GET /tools/in_app_subscriptions`：检索应用内订阅列表。
 - `POST /tools/llm/split_tasks`：调用大模型进行子任务拆分（输入：用户需求、节点能力，输出：任务列表、描述、确认提示）。
 - `POST /tools/llm/split_subtasks`：另一种拆分路由（输入字段名不同），建议统一接入其中一个即可。
+- `POST /tools/llm/refine_subtasks`：依据用户自然语言反馈改写拆分（输入：`user_requirement`、`node_capabilities`、`feedback`、`previous_tasks`；输出：`tasks`、`description`、`prompt_for_confirmation`、`plan_text`）。
 - `POST /tools/llm/decide_next`：调用大模型控制流程决策（输入：候选步骤与状态摘要，输出：下一步）。
 - `POST /tools/market/search`：市场检索三方服务（输入：所需服务列表与来源子任务）。
 - `POST /tools/market/service_info`：查询服务具体信息（名称、来源、链接）。
 - `POST /tools/node/generate_metadata`：生成节点元数据（严格 JSON）。
 - `POST /tools/node/build_graph`：将节点元数据串联为图。
-- `POST /tools/llm/split_subtasks`：调用大模型进行子任务拆分（输入：`user_requirement`、`node_capabilities`；输出：`tasks`、`description`、`prompt_for_confirmation`）。
+- `POST /tools/llm/split_subtasks`：调用大模型进行子任务拆分（输入：`user_requirement`、`node_capabilities`；输出：`tasks`、`description`、`prompt_for_confirmation`、`plan_text`）。
 
 三方服务订阅列表示例：
 ```
@@ -70,7 +71,15 @@
        "node_desc_path": "./node_desc.txt",
    }, config={"configurable": {"thread_id": thread_id}})
 
-   print(state["prompt_for_confirmation"])  # 展示确认提示
+   print(state.get("plan_text"))  # 向用户展示自然语言规划
+   print(state.get("prompt_for_confirmation"))  # 展示确认提示
+
+   # 若用户提出自然语言修改意见（例如：“把RAG检索改为调用品牌目录API，并新增英文翻译”）
+   state = app.invoke({
+       "user_feedback": "把RAG检索改为调用品牌目录API，并新增英文翻译",
+   }, config={"configurable": {"thread_id": thread_id}})
+   print(state.get("plan_text"))  # 更新后的自然语言规划
+   print(state.get("prompt_for_confirmation"))
 
    # 用户确认后继续
    state = app.invoke({"confirmed": True}, config={"configurable": {"thread_id": thread_id}})

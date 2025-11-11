@@ -1,20 +1,35 @@
 import os
 import json
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 
 from openai import OpenAI
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
 
-load_dotenv()
+# Load environment variables from the nearest .env file, if present.
+# This is more robust than relying on CWD-only loading.
+try:
+    dotenv_path = find_dotenv(usecwd=True)
+    if dotenv_path:
+        load_dotenv(dotenv_path=dotenv_path)
+    else:
+        # Fallback: attempt default loader (no-op if .env absent)
+        load_dotenv()
+except Exception:
+    # Proceed even if dotenv loading fails; env may be provided by the OS
+    pass
 
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
-LLM_MODEL = os.getenv("LLM_MODEL", "")
+
+def _get_llm_config() -> Tuple[str, str, str]:
+    base_url = os.getenv("LLM_BASE_URL", "")
+    api_key = os.getenv("LLM_API_KEY", "")
+    model = os.getenv("LLM_MODEL", "")
+    return base_url, api_key, model
 
 
 def is_configured() -> bool:
-    return bool(LLM_BASE_URL and LLM_API_KEY and LLM_MODEL)
+    base_url, api_key, model = _get_llm_config()
+    return bool(base_url and api_key and model)
 
 
 # 使用 OpenAI 兼容 SDK（DeepSeek API）
@@ -23,10 +38,11 @@ def is_configured() -> bool:
 def chat(messages: List[Dict[str, Any]], response_format_json: bool = True, temperature: float = 0.0) -> Optional[str]:
     if not is_configured():
         return None
+    base_url, api_key, model = _get_llm_config()
     try:
-        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+        client = OpenAI(api_key=api_key, base_url=base_url)
         params: Dict[str, Any] = {
-            "model": LLM_MODEL,
+            "model": model,
             "messages": messages,
             "temperature": temperature,
         }

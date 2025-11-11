@@ -1,0 +1,27 @@
+[
+  {
+    "name": "W+品牌目录",
+    "resource": "API",
+    "link": "https://market.example.com/api/brand-catalog"
+  },
+  {
+    "name": "内置OCR",
+    "resource": "AI能力",
+    "link": "https://market.example.com/ai/ocr"
+  },
+  {
+    "name": "报表导出",
+    "resource": "API",
+    "link": "https://market.example.com/tool/report-export"
+  },
+  {
+    "name": "对象存储",
+    "resource": "API",
+    "link": "https://market.example.com/api/object-storage"
+  },
+  {
+    "name": "文案润色",
+    "resource": "AI能力",
+    "link": "https://market.example.com/ai/copy-enhance"
+  }
+]
