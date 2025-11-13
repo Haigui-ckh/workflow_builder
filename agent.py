@@ -119,6 +119,7 @@ def call_llm_split(user_requirement: str, caps: Dict[str, Any]) -> Dict[str, Any
             })
         except Exception:
             continue
+    print("llm split tasks",tasks)
     desc = data.get("description")
     prompt = data.get("prompt_for_confirmation")
     plan_text = _render_plan_text(tasks, desc) if tasks else None

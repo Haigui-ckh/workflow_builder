@@ -26,23 +26,23 @@ def main():
     print("== 第一次拆分完成，等待确认 ==")
     print("plan_text:\n", state.get("plan_text"))
     print("prompt_for_confirmation:", state.get("prompt_for_confirmation"))
-    print("tasks_count:", len(state.get("tasks", [])))
+    # print("tasks_count:", len(state.get("tasks", [])))
 
     # 用户确认后继续（如果需要）
-    state = app.invoke({"confirmed": True}, config={"configurable": {"thread_id": thread_id}})
+    # state = app.invoke({"confirmed": True}, config={"configurable": {"thread_id": thread_id}})
 
-    print("== 订阅校验结果 ==")
-    print("status:", state.get("status"))
-    print("missing_services:", state.get("missing_services"))
-    print("subscription_suggestions:", state.get("subscription_suggestions"))
+    # print("== 订阅校验结果 ==")
+    # print("status:", state.get("status"))
+    # print("missing_services:", state.get("missing_services"))
+    # print("subscription_suggestions:", state.get("subscription_suggestions"))
 
-    # 再次调用以继续流程（若仍需暂停订阅或已进入元数据生成）
-    state = app.invoke({}, config={"configurable": {"thread_id": thread_id}})
-    print("== 当前状态 ==")
-    print("status:", state.get("status"))
-    if state.get("graph"):
-        print("graph nodes:", len(state["graph"].get("nodes", [])))
-        print("graph edges:", len(state["graph"].get("edges", [])))
+    # # 再次调用以继续流程（若仍需暂停订阅或已进入元数据生成）
+    # state = app.invoke({}, config={"configurable": {"thread_id": thread_id}})
+    # print("== 当前状态 ==")
+    # print("status:", state.get("status"))
+    # if state.get("graph"):
+    #     print("graph nodes:", len(state["graph"].get("nodes", [])))
+    #     print("graph edges:", len(state["graph"].get("edges", [])))
 
 
 if __name__ == "__main__":
