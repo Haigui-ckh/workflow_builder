@@ -31,7 +31,7 @@ def log_event(category: str, action: str, data: Optional[Dict[str, Any]] = None)
         data: Extra key-value pairs to attach.
     """
     payload = {
-        "ts": datetime.utcnow().isoformat() + "Z",
+        # "ts": datetime.utcnow().isoformat() + "Z",
         "category": category,
         "action": action,
         "data": data or {},

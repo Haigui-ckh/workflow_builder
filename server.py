@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field, ValidationError
 from llm_client import chat, build_messages, safe_json_parse, is_configured
 import json
-from logger import log_event
+from utils.logger import log_event
 from prompts import (
     SYSTEM_METADATA_PROMPT,
     build_metadata_user_prompt,
@@ -101,55 +101,69 @@ def _load_json_file(path: str, default):
         return default
 
 
-@app.get("/tools/in_app_subscriptions", response_model=List[SubscriptionItem])
-def list_in_app_subscriptions() -> List[SubscriptionItem]:
-    # 从静态文件返回应用内已订阅的三方服务列表
-    log_event("server", "route_start", {"path": "/tools/in_app_subscriptions"})
+def get_in_app_subscriptions() -> List[Dict[str, Any]]:
     raw = _load_json_file(_mock_path("in_app_subscriptions.json"), [])
-    items: List[SubscriptionItem] = []
+    items: List[Dict[str, Any]] = []
     for it in raw:
         try:
-            items.append(SubscriptionItem(**it))
+            item = SubscriptionItem(**it)
+            items.append(item.model_dump())
         except Exception:
             continue
+    return items
+
+
+@app.get("/tools/in_app_subscriptions", response_model=List[SubscriptionItem])
+def list_in_app_subscriptions() -> List[SubscriptionItem]:
+    log_event("server", "route_start", {"path": "/tools/in_app_subscriptions"})
+    items = [SubscriptionItem(**it) for it in get_in_app_subscriptions()]
     log_event("server", "route_end", {"path": "/tools/in_app_subscriptions", "count": len(items)})
     return items
 
 
-@app.post("/tools/market/search", response_model=MarketSearchResponse)
-def search_market_services(req: MarketSearchRequest) -> MarketSearchResponse:
-    # 基于静态文件的市场目录进行检索
-    log_event("server", "route_start", {"path": "/tools/market/search", "required_services": req.required_services})
+def market_search(required_services: List[str], from_tasks: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     catalog = _load_json_file(_mock_path("market_catalog.json"), [])
-    required_set = set(req.required_services or [])
-    matched: List[SubscriptionItem] = []
+    required_set = set(required_services or [])
+    matched: List[Dict[str, Any]] = []
     for it in catalog:
         name = it.get("name")
         resource = it.get("resource")
-        # 命中条件：服务名在 required_services，或 required 包含资源枚举字符串
         if (name and name in required_set) or (resource and resource in required_set):
             try:
-                matched.append(SubscriptionItem(**it))
+                item = SubscriptionItem(**it)
+                matched.append(item.model_dump())
             except Exception:
                 continue
+    return matched
+
+
+@app.post("/tools/market/search", response_model=MarketSearchResponse)
+def search_market_services(req: MarketSearchRequest) -> MarketSearchResponse:
+    log_event("server", "route_start", {"path": "/tools/market/search", "required_services": req.required_services})
+    matched = [SubscriptionItem(**it) for it in market_search(req.required_services, req.from_tasks)]
     resp = MarketSearchResponse(items=matched)
     log_event("server", "route_end", {"path": "/tools/market/search", "count": len(resp.items)})
     return resp
 
 
-@app.post("/tools/market/service_info", response_model=ServiceInfoResponse)
-def get_service_info(req: ServiceInfoRequest) -> ServiceInfoResponse:
-    # 从静态市场目录查询服务的具体信息（名称、来源、服务链接）
-    log_event("server", "route_start", {"path": "/tools/market/service_info", "service_names": req.service_names})
+def market_service_info(service_names: List[str], resource: Optional[ResourceEnum] = None) -> List[Dict[str, Any]]:
     catalog = _load_json_file(_mock_path("market_catalog.json"), [])
-    name_set = set(req.service_names or [])
-    found: List[SubscriptionItem] = []
+    name_set = set(service_names or [])
+    found: List[Dict[str, Any]] = []
     for it in catalog:
         if it.get("name") in name_set:
             try:
-                found.append(SubscriptionItem(**it))
+                item = SubscriptionItem(**it)
+                found.append(item.model_dump())
             except Exception:
                 continue
+    return found
+
+
+@app.post("/tools/market/service_info", response_model=ServiceInfoResponse)
+def get_service_info(req: ServiceInfoRequest) -> ServiceInfoResponse:
+    log_event("server", "route_start", {"path": "/tools/market/service_info", "service_names": req.service_names})
+    found = [SubscriptionItem(**it) for it in market_service_info(req.service_names, req.resource)]
     resp = ServiceInfoResponse(items=found)
     log_event("server", "route_end", {"path": "/tools/market/service_info", "count": len(resp.items)})
     return resp

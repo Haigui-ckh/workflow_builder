@@ -1,19 +1,17 @@
 import os
+import json
 from typing import TypedDict, List, Dict, Any, Optional
-from pathlib import Path
 
-from tools_client import (
-    call_in_app_subscriptions,
-    call_market_search,
-    call_service_info,
-    call_generate_node_metadata,
-    call_build_graph,
+from server import (
+    get_in_app_subscriptions,
+    market_search,
+    market_service_info,
+    NodeMetadataModel,
 )
 from node_caps import parse_node_capabilities
 from node_matcher import assign_nodes_to_tasks
 from langgraph.graph import StateGraph, END
-# 可选的检查点：若 SQLiteSaver 不可用，则不启用持久化检查点
-from logger import log_event
+from utils.logger import log_event
 from prompts import (
     SYSTEM_CONTROLLER_PROMPT,
     SYSTEM_SPLIT_PROMPT,
@@ -22,9 +20,6 @@ from prompts import (
     build_decide_user_prompt,
     summarize_state,
 )
-
-
-# 工具路由基地址迁移至 tools_client 模块
 
 
 class AgentState(TypedDict, total=False):
@@ -48,6 +43,7 @@ class AgentState(TypedDict, total=False):
 
 
 def split_subtasks(user_requirement: str, caps: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """规则兜底拆分：根据用户需求与节点能力生成基础子任务列表。"""
     # 规则化拆分（兜底，当 LLM 拆分失败或无结果时使用）
     tasks: List[Dict[str, Any]] = []
     req = user_requirement.lower()
@@ -89,38 +85,88 @@ def split_subtasks(user_requirement: str, caps: Dict[str, Any]) -> List[Dict[str
 # ---------------------- 图节点函数 ----------------------
 
 def call_llm_split(user_requirement: str, caps: Dict[str, Any]) -> Dict[str, Any]:
-    from tools_client import call_llm_split_subtasks
-    return call_llm_split_subtasks(
-        user_requirement,
-        caps,
-        SYSTEM_SPLIT_PROMPT,
-        build_split_user_prompt(user_requirement, summarize_caps(caps)),
+    """调用大模型进行任务拆分并返回结构化结果。"""
+    from llm_client import chat, build_messages, safe_json_parse, is_configured
+    if not is_configured():
+        return {"tasks": [], "description": None, "prompt_for_confirmation": None}
+    system = SYSTEM_SPLIT_PROMPT or (
+        "你是任务拆分专家。请将用户需求拆分为若干子任务，"
+        "每个子任务对应单个节点能力（Prompt、脚本、循环、RAG、API、AI能力、MCP）。"
     )
+    user = build_split_user_prompt(user_requirement, summarize_caps(caps))
+    content = chat(build_messages(system, user), response_format_json=True)
+    data = safe_json_parse(content) or {}
+    raw_tasks = data.get("tasks") or []
+    tasks: List[Dict[str, Any]] = []
+    for t in raw_tasks:
+        try:
+            tasks.append({
+                "id": str(t.get("id")),
+                "type": str(t.get("type")),
+                "description": str(t.get("description", "")),
+                "uses_service": (t.get("resource") in ("API", "MCP", "AI能力", "RAG")),
+                "service": t.get("service"),
+                "resource": (t.get("resource") if t.get("resource") in ("API", "MCP", "AI能力", "RAG") else None),
+            })
+        except Exception:
+            continue
+    desc = data.get("description")
+    prompt = data.get("prompt_for_confirmation")
+    plan_text = _render_plan_text(tasks, desc) if tasks else None
+    return {"tasks": tasks, "description": desc, "prompt_for_confirmation": prompt, "plan_text": plan_text}
 
 def call_llm_refine(user_requirement: str, caps: Dict[str, Any], feedback: str, previous_tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
-    # 由服务端构建更详细的改写提示词；此处传递基础上下文
-    from tools_client import call_llm_refine_subtasks
-    return call_llm_refine_subtasks(
-        user_requirement,
-        caps,
-        feedback,
-        previous_tasks,
-        SYSTEM_SPLIT_PROMPT,
-        None,
+    """根据用户反馈调用大模型改写已有拆分结果。"""
+    from llm_client import chat, build_messages, safe_json_parse, is_configured
+    from prompts import build_refine_split_user_prompt
+    if not is_configured():
+        return {"tasks": [], "description": None, "prompt_for_confirmation": None}
+    system = SYSTEM_SPLIT_PROMPT or (
+        "你是任务拆分专家。需要根据用户的自然语言反馈对现有拆分进行改写，"
+        "确保每个子任务可由单节点能力完成（Prompt、脚本、循环、RAG、API、AI能力、MCP）。"
     )
+    caps_summary = summarize_caps(caps)
+    user = build_refine_split_user_prompt(user_requirement, caps_summary, feedback, previous_tasks)
+    content = chat(build_messages(system, user), response_format_json=True)
+    data = safe_json_parse(content) or {}
+    raw_tasks = data.get("tasks") or []
+    tasks: List[Dict[str, Any]] = []
+    for t in raw_tasks:
+        try:
+            tasks.append({
+                "id": str(t.get("id")),
+                "type": str(t.get("type")),
+                "description": str(t.get("description", "")),
+                "uses_service": (t.get("resource") in ("API", "MCP", "AI能力", "RAG")),
+                "service": t.get("service"),
+                "resource": (t.get("resource") if t.get("resource") in ("API", "MCP", "AI能力", "RAG") else None),
+            })
+        except Exception:
+            continue
+    desc = data.get("description")
+    prompt = data.get("prompt_for_confirmation")
+    plan_text = _render_plan_text(tasks, desc) if tasks else None
+    return {"tasks": tasks, "description": desc, "prompt_for_confirmation": prompt, "plan_text": plan_text}
 
 def call_llm_decide_next(state: Dict[str, Any], allowed_steps: List[str]) -> Optional[str]:
-    from tools_client import call_llm_decide
-    res = call_llm_decide(
-        allowed_steps,
-        summarize_state(state),
-        SYSTEM_CONTROLLER_PROMPT,
-        build_decide_user_prompt(summarize_state(state), allowed_steps),
+    """调用大模型在候选步骤中选择下一步。"""
+    from llm_client import chat, build_messages, safe_json_parse, is_configured
+    if not is_configured():
+        return None
+    system = SYSTEM_CONTROLLER_PROMPT or (
+        "你是流程控制器。请在候选步骤中选择一个最合理的下一步，"
+        "遵循：拆分→订阅校验→市场检索→元数据→构图。"
     )
-    return res.get("next_step")
+    summary = summarize_state(state)
+    user = build_decide_user_prompt(summary, allowed_steps)
+    content = chat(build_messages(system, user), response_format_json=True)
+    data = safe_json_parse(content) or {}
+    next_step = data.get("next_step")
+    return next_step if next_step in allowed_steps else None
 
 
 def _render_plan_text(tasks: List[Dict[str, Any]], description: Optional[str]) -> str:
+    """将拆分任务与描述渲染为人类可读的规划文本。"""
     lines = []
     if description:
         lines.append(f"规划概述：{description}")
@@ -135,7 +181,8 @@ def _render_plan_text(tasks: List[Dict[str, Any]], description: Optional[str]) -
     return "\n".join(lines)
 
 def node_split(state: AgentState) -> AgentState:
-    log_event("agent", "node_start", {"node": "split"})
+    """图节点：执行拆分逻辑并写入规划状态。"""
+    log_event("agent", "node_split", {"phase": "start"})
     caps = parse_node_capabilities(state.get("node_desc_path"))
     req_text = state.get("user_requirement") or ""
     # 先调用 LLM 进行拆分（支持用户反馈改写）
@@ -201,11 +248,12 @@ def node_split(state: AgentState) -> AgentState:
         "status": "await_confirmation" if not state.get("confirmed") else "confirmed",
         "review_notes": review_notes,
     })
-    log_event("agent", "node_end", {"node": "split", "task_count": len(tasks), "has_review": bool(review_notes)})
+    log_event("agent", "node_split", {"phase": "end", "task_count": len(tasks), "has_review": bool(review_notes)})
     return state
 
 
 def should_continue_after_split(state: AgentState) -> str:
+    """拆分后决策：确定进入确认或订阅校验。"""
     log_event("agent", "decision_start", {"from": "split"})
     decision = call_llm_decide_next(state, ["pause_confirmation", "check_subs"]) or ""
     if decision in ("pause_confirmation", "check_subs"):
@@ -215,15 +263,17 @@ def should_continue_after_split(state: AgentState) -> str:
 
 
 def node_pause_confirmation(state: AgentState) -> AgentState:
-    log_event("agent", "node_start", {"node": "pause_confirmation"})
+    """图节点：暂停等待用户对规划进行确认。"""
+    log_event("agent", "node_pause_confirmation", {"phase": "start"})
     state["status"] = "await_confirmation"
-    log_event("agent", "node_end", {"node": "pause_confirmation"})
+    log_event("agent", "node_pause_confirmation", {"phase": "end"})
     return state
 
 
 def node_check_subs(state: AgentState) -> AgentState:
-    log_event("agent", "node_start", {"node": "check_subs"})
-    in_app = call_in_app_subscriptions()
+    """图节点：校验应用内订阅并标记缺失服务。"""
+    log_event("agent", "node_check_subs", {"phase": "start"})
+    in_app = get_in_app_subscriptions()
     state["in_app_services"] = in_app
 
     # 仅对三方服务生态的子任务进行订阅校验
@@ -243,11 +293,12 @@ def node_check_subs(state: AgentState) -> AgentState:
             missing.append(need)
     state["missing_services"] = missing
     state["status"] = "subscriptions_ok" if not missing else "subscriptions_missing"
-    log_event("agent", "node_end", {"node": "check_subs", "missing": len(missing)})
+    log_event("agent", "node_check_subs", {"phase": "end", "missing": len(missing)})
     return state
 
 
 def should_continue_after_check(state: AgentState) -> str:
+    """订阅校验后决策：选择市场检索或元数据生成。"""
     log_event("agent", "decision_start", {"from": "check_subs"})
     decision = call_llm_decide_next(state, ["search_market", "generate_metadata"]) or ""
     if decision in ("search_market", "generate_metadata"):
@@ -257,47 +308,128 @@ def should_continue_after_check(state: AgentState) -> str:
 
 
 def node_search_market(state: AgentState) -> AgentState:
-    log_event("agent", "node_start", {"node": "search_market"})
+    """图节点：根据缺失服务从市场检索并给出建议。"""
+    log_event("agent", "node_search_market", {"phase": "start"})
     miss = state.get("missing_services", [])
     required_names = [m.get("name") or m.get("resource") for m in miss]
-    suggestions = call_market_search(required_names, state.get("tasks", []))
+    suggestions = market_search(required_names, state.get("tasks", []))
 
     # 查询更详细信息（名称、来源、链接）
     enrich_names = [s.get("name") for s in suggestions if s.get("name")]
-    detailed = call_service_info(enrich_names)
+    detailed = market_service_info(enrich_names)
 
     state["subscription_suggestions"] = detailed or suggestions
     state["status"] = "await_subscription"
-    log_event("agent", "node_end", {"node": "search_market", "suggestions": len(state["subscription_suggestions"])})
+    log_event("agent", "node_search_market", {"phase": "end", "suggestions": len(state["subscription_suggestions"])})
     return state
 
 
 def node_pause_subscription(state: AgentState) -> AgentState:
-    # 暂停，等待用户完成订阅后重试（返回第二步）
-    log_event("agent", "node_start", {"node": "pause_subscription"})
-    log_event("agent", "node_end", {"node": "pause_subscription"})
+    """图节点：暂停等待用户完成订阅后再继续。"""
+    log_event("agent", "node_pause_subscription", {"phase": "start"})
+    log_event("agent", "node_pause_subscription", {"phase": "end"})
     return state
 
 
 def node_generate_metadata(state: AgentState) -> AgentState:
-    log_event("agent", "node_start", {"node": "generate_metadata"})
+    """图节点：为每个子任务生成节点元数据。"""
+    log_event("agent", "node_generate_metadata", {"phase": "start"})
     metas: List[Dict[str, Any]] = []
     for t in state.get("tasks", []):
-        meta = call_generate_node_metadata(t)
+        meta = _generate_node_metadata_local(t)
         metas.append(meta)
     state["node_metadata_list"] = metas
     state["status"] = "metadata_generated"
-    log_event("agent", "node_end", {"node": "generate_metadata", "count": len(metas)})
+    log_event("agent", "node_generate_metadata", {"phase": "end", "count": len(metas)})
     return state
 
 
 def node_build_graph(state: AgentState) -> AgentState:
-    log_event("agent", "node_start", {"node": "build_graph"})
-    graph = call_build_graph(state.get("node_metadata_list", []))
+    """图节点：根据元数据构建工作流图。"""
+    log_event("agent", "node_build_graph", {"phase": "start"})
+    graph = _build_graph_local(state.get("node_metadata_list", []))
     state["graph"] = graph
     state["status"] = "completed"
-    log_event("agent", "node_end", {"node": "build_graph", "edge_count": len(graph.get("edges", []))})
+    log_event("agent", "node_build_graph", {"phase": "end", "edge_count": len(graph.get("edges", []))})
     return state
+
+
+def _generate_node_metadata_local(subtask: Dict[str, Any]) -> Dict[str, Any]:
+    """在本地调用大模型生成并校验单个节点元数据。"""
+    from llm_client import chat, build_messages, safe_json_parse, is_configured
+    from prompts import SYSTEM_METADATA_PROMPT, build_metadata_user_prompt, build_metadata_correction_prompt
+    json_schema = {
+        "type": "object",
+        "required": ["id", "type", "name", "description", "config", "inputs", "outputs", "depends_on"],
+        "properties": {
+            "id": {"type": "string"},
+            "type": {"type": "string", "enum": ["Prompt", "脚本", "循环", "RAG", "API", "AI能力", "MCP"]},
+            "name": {"type": "string"},
+            "description": {"type": "string"},
+            "resource": {"type": "string", "enum": ["API", "MCP", "AI能力", "RAG"]},
+            "config": {"type": "object"},
+            "inputs": {"type": "array", "items": {"type": "object"}},
+            "outputs": {"type": "array", "items": {"type": "object"}},
+            "depends_on": {"type": "array", "items": {"type": "string"}},
+        },
+        "additionalProperties": True,
+    }
+    fallback_meta = {
+        "id": subtask.get("id"),
+        "type": subtask.get("type"),
+        "name": subtask.get("service") or subtask.get("type"),
+        "description": subtask.get("description"),
+        "resource": subtask.get("resource"),
+        "config": {},
+        "inputs": [],
+        "outputs": [],
+        "depends_on": [],
+    }
+    if not is_configured():
+        return fallback_meta
+    system = SYSTEM_METADATA_PROMPT
+    user = build_metadata_user_prompt(subtask, json_schema)
+    attempts = 0
+    max_attempts = 3
+    validated = None
+    last_error = None
+    while attempts < max_attempts and validated is None:
+        attempts += 1
+        content = chat(build_messages(system, user), response_format_json=True)
+        data = safe_json_parse(content)
+        if not isinstance(data, dict):
+            last_error = {"type": "parse_error", "message": "LLM 未返回有效 JSON"}
+            user = build_metadata_correction_prompt(json.dumps(last_error, ensure_ascii=False), json_schema)
+            continue
+        try:
+            validated = NodeMetadataModel(**data)
+        except Exception as e:
+            try:
+                from pydantic import ValidationError
+                last_error = e.errors() if isinstance(e, ValidationError) else {"error": str(e)}
+            except Exception:
+                last_error = {"error": str(e)}
+            user = build_metadata_correction_prompt(json.dumps(last_error, ensure_ascii=False), json_schema)
+            continue
+    return validated.model_dump() if validated is not None else fallback_meta
+
+
+def _build_graph_local(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """在本地根据节点列表生成边并形成有向图。"""
+    edges: List[Dict[str, Any]] = []
+    id_to_node = {n.get("id"): n for n in nodes if n.get("id") is not None}
+    any_dep = False
+    for n in nodes:
+        deps = n.get("depends_on") or []
+        if deps:
+            any_dep = True
+        for d in deps:
+            if d in id_to_node:
+                edges.append({"from": d, "to": n.get("id")})
+    if not any_dep:
+        for i in range(len(nodes) - 1):
+            edges.append({"from": nodes[i].get("id"), "to": nodes[i + 1].get("id")})
+    return {"nodes": nodes, "edges": edges}
 
 
 def create_app():

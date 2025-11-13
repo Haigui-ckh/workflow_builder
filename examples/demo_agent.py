@@ -18,7 +18,7 @@ def main():
 
     # 第一次调用：进行拆分并暂停等待确认
     state = app.invoke({
-        "user_requirement": "请对上传的产品清单进行统一查询，并输出摘要报告",
+        "user_requirement": "根据用户提出的问题，查询流水线运营知识库，结合知识库内容，生成符合要求的回答",
         "confirmed": False,
         "node_desc_path": "./node_desc.txt",
     }, config={"configurable": {"thread_id": thread_id}})
