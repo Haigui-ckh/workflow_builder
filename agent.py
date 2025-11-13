@@ -83,7 +83,15 @@ def split_subtasks(user_requirement: str, caps: Dict[str, Any]) -> List[Dict[str
 
 
 # ---------------------- 图节点函数 ----------------------
-
+# 拆分策略 
+# 1. 对于需要三方服务的，标识三方服务 ；2. 对于不需要三方服务的，直接标识节点
+# 拆分字段设计
+# {
+#     "description": "任务描述",
+#     "type": "platform", # platform / service
+#     "node": "Prompt", # 具体节点类型 若第三方服务则暂时不需要
+# }
+# 后续三方服务: 先进行工具检索 然后 大模型匹配工具到任务 生成完整的任务拆分数据
 def call_llm_split(user_requirement: str, caps: Dict[str, Any]) -> Dict[str, Any]:
     """调用大模型进行任务拆分并返回结构化结果。"""
     from llm_client import chat, build_messages, safe_json_parse, is_configured
@@ -95,6 +103,7 @@ def call_llm_split(user_requirement: str, caps: Dict[str, Any]) -> Dict[str, Any
     )
     user = build_split_user_prompt(user_requirement, summarize_caps(caps))
     content = chat(build_messages(system, user), response_format_json=True)
+    # 大模型 JSON parse
     data = safe_json_parse(content) or {}
     raw_tasks = data.get("tasks") or []
     tasks: List[Dict[str, Any]] = []
@@ -269,7 +278,10 @@ def node_pause_confirmation(state: AgentState) -> AgentState:
     log_event("agent", "node_pause_confirmation", {"phase": "end"})
     return state
 
-
+# 检索已订阅工具 --> 大模型匹配工具到任务
+# 工具使用优先级
+#   已订阅 > 市场
+#   AI能力 API节点 MCP节点
 def node_check_subs(state: AgentState) -> AgentState:
     """图节点：校验应用内订阅并标记缺失服务。"""
     log_event("agent", "node_check_subs", {"phase": "start"})

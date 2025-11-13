@@ -1,3 +1,5 @@
+import os
+
 SYSTEM_CONTROLLER_PROMPT = (
     "你是工作流构建平台的流程控制器。根据用户需求与当前状态，"
     "在给定的候选步骤中选择下一步，确保流程符合：拆分任务→订阅校验→市场检索→节点元数据→构建图。"
@@ -10,13 +12,16 @@ SYSTEM_SPLIT_PROMPT = (
     "只输出 json，不要任何额外文本。"
 )
 
+
 def build_split_user_prompt(requirement: str, caps_summary: str) -> str:
-    return (
-        f"用户需求：{requirement}\n"
-        f"节点能力摘要：{caps_summary}\n"
-        "请输出 json：{tasks:[{id,type,description,resource?,service?}],description,prompt_for_confirmation}。"
-        "仅输出 json 对象。"
-    )
+    base_dir = os.path.dirname(__file__)
+    path = os.path.join(base_dir, "templates", "prompts", "split_user_prompt.txt")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            tpl = f.read()
+        return tpl.replace("{requirement}", requirement).replace("{caps_summary}", caps_summary)
+    except Exception:
+        return
 
 # 节点能力聚合
 def summarize_caps(caps: dict | str) -> str:
