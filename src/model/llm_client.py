@@ -90,9 +90,3 @@ def safe_json_parse(text: Optional[str]) -> Optional[Dict[str, Any]]:
         except Exception:
             return None
     return None
-
-def get_llm_config_debug(mask_api_key: bool = True) -> Dict[str, str]:
-    base_url, api_key, model = _get_llm_config()
-    if mask_api_key and api_key:
-        api_key = (api_key[:4] + "..." + api_key[-4:]) if len(api_key) > 8 else "****"
-    return {"base_url": base_url, "api_key": api_key, "model": model}

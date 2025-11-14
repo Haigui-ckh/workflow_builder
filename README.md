@@ -25,20 +25,28 @@
 5. 构建节点图
    - 调用工具将节点元数据串联成图，作为最终结果返回。
 
+## 架构设计
+
+- Agent 层（LangGraph）：`src/agent.py` 基于 `StateGraph` 构建流程图，节点包含 `split`、`pause_confirmation`、`check_subs`、`search_market`、`pause_subscription`、`generate_metadata`、`build_graph`，并通过条件边控制推进（`src/agent.py:402-425`）。
+- 工具路由（FastAPI）：`src/tool/server.py` 提供 HTTP 路由与 Pydantic 模型校验，包含订阅检索、市场检索、节点元数据生成与图构建等（例如 `src/tool/server.py:116-121`, `140-169`, `172-256`, `259-281`）。
+- 能力与匹配：`src/node/node_caps.py` 汇总节点能力与资源类型，`src/node/node_matcher.py` 通过关键词与资源提示将任务匹配到具体节点类型（`src/node/node_matcher.py:36-86`）。
+- 模型适配：`src/model/llm_client.py` 统一封装模型调用与 JSON 解析，支持环境变量配置与容错（`src/model/llm_client.py:31-69`）。
+- 日志观测：`src/utils/logger.py` 输出结构化 JSON 日志，便于调试观测（`src/utils/logger.py:25-43`）。
+- 模板与示例：提示词模板位于 `templates/`，示例脚本位于 `examples/demo_agent.py`。
+
 ## 工具路由（占位实现）
 
 > 规则：上述流程中提到的工具均生成对应的路由接口，无需填充具体实现内容。
 
 - `GET /tools/in_app_subscriptions`：检索应用内订阅列表。
-- `POST /tools/llm/split_tasks`：调用大模型进行子任务拆分（输入：用户需求、节点能力，输出：任务列表、描述、确认提示）。
-- `POST /tools/llm/split_subtasks`：另一种拆分路由（输入字段名不同），建议统一接入其中一个即可。
+- `POST /tools/llm/split_tasks`：调用大模型进行子任务拆分（输入：用户需求、节点能力）。
 - `POST /tools/llm/refine_subtasks`：依据用户自然语言反馈改写拆分（输入：`user_requirement`、`node_capabilities`、`feedback`、`previous_tasks`；输出：`tasks`、`description`、`prompt_for_confirmation`、`plan_text`）。
 - `POST /tools/llm/decide_next`：调用大模型控制流程决策（输入：候选步骤与状态摘要，输出：下一步）。
 - `POST /tools/market/search`：市场检索三方服务（输入：所需服务列表与来源子任务）。
 - `POST /tools/market/service_info`：查询服务具体信息（名称、来源、链接）。
 - `POST /tools/node/generate_metadata`：生成节点元数据（严格 JSON）。
 - `POST /tools/node/build_graph`：将节点元数据串联为图。
-- `POST /tools/llm/split_subtasks`：调用大模型进行子任务拆分（输入：`user_requirement`、`node_capabilities`；输出：`tasks`、`description`、`prompt_for_confirmation`、`plan_text`）。
+
 
 三方服务订阅列表示例：
 ```
@@ -56,19 +64,19 @@
 1) 安装依赖（需 Python 3.10+）：
    - 参考 `requirements.txt`。
 
-2) 启动工具路由服务：
-   - `uvicorn server:app --reload`
+2) 启动工具路由服务（项目根目录执行）：
+   - `uvicorn src.tool.server:app --reload`
 
 3) 在 Python 中驱动 Agent（示意）：
    ```python
-   from agent import create_app
+   from src.agent import create_app
    app = create_app()
 
    thread_id = "demo-thread"
    state = app.invoke({
        "user_requirement": "请对上传的产品清单进行统一查询，并输出摘要报告",
        "confirmed": False,
-       "node_desc_path": "./node_desc.txt",
+       "node_desc_path": "templates/node/node_desc.txt",
    }, config={"configurable": {"thread_id": thread_id}})
 
    print(state.get("plan_text"))  # 向用户展示自然语言规划
@@ -94,7 +102,7 @@
 
 ## 模型接入与配置
 
-- 环境变量（参考 `.env.example`，复制为 `.env` 并填充）：
+- 环境变量（参考 `.env.sample`，复制为 `.env` 并填充）：
   - `LLM_BASE_URL`：OpenAI-compatible 的基础地址（例如 `https://api.xxx.com`）。
   - `LLM_API_KEY`：模型服务的 API Key。
   - `LLM_MODEL`：模型 ID。
@@ -134,10 +142,23 @@
 
 ## 文件结构
 
-- `server.py`：工具路由接口（FastAPI，占位实现）。
-- `agent.py`：LangGraph Agent 逻辑与工具调用封装。
-- `node_desc.txt`：节点能力描述（参考拆分）。
+- `src/agent.py`：LangGraph Agent 逻辑与工具调用封装。
+- `src/tool/server.py`：工具路由接口（FastAPI，占位实现）。
+- `src/tool/tools_client.py`：工具路由 HTTP 客户端封装。
+- `src/model/llm_client.py`：模型接入与 JSON 解析封装。
+- `src/model/prompts.py`：系统与用户提示词构建。
+- `src/node/node_caps.py`：节点能力与资源类型汇总。
+- `src/node/node_matcher.py`：基于关键词与资源提示的匹配器。
+- `src/utils/logger.py`：结构化日志。
+- `templates/`：提示词与节点能力模板。
+- `examples/`：示例脚本。
+- `mock_data/`：示例订阅与市场数据。
 - `requirements.txt`：依赖清单。
+
+## 已知问题与注意
+
+- Mock 数据路径：`src/tool/server.py` 默认在其目录下查找 `mock_data/`，当前仓库的 `mock_data/` 位于项目根目录，导致路由返回空数据。开发时可将 `mock_data/` 复制到 `src/tool/` 下或调整加载逻辑。
+- 路由与本地调用：`src/agent.py` 在单进程模式下直接调用工具函数（非 HTTP），也可改为通过 `TOOLS_BASE_URL` 使用 HTTP 路由（参见 `src/tool/tools_client.py`）。
 
 ## 备注
 

@@ -30,7 +30,6 @@ class AgentState(TypedDict, total=False):
     prompt_for_confirmation: str
     confirmed: bool
     required_services: List[Dict[str, Any]]
-    in_app_services: List[Dict[str, Any]]
     missing_services: List[Dict[str, Any]]
     subscription_suggestions: List[Dict[str, Any]]
     node_metadata_list: List[Dict[str, Any]]
@@ -64,16 +63,22 @@ def call_llm_split(user_requirement: str, caps: Dict[str, Any]) -> Dict[str, Any
     data = safe_json_parse(content) or {}
     raw_tasks = data.get("tasks") or []
     tasks: List[Dict[str, Any]] = []
-    # print("llm generate tasks",raw_tasks)
     for t in raw_tasks:
         try:
+            category = str(t.get("type")) if t.get("type") is not None else ""
+            node_type = t.get("nodeType")
+            desc = str(t.get("description", ""))
+            resource = t.get("resource") if t.get("resource") in ("API", "MCP", "AI能力", "RAG") else None
+            service = t.get("service")
+            uses_service = (category == "service") and (resource in ("API", "MCP", "AI能力", "RAG"))
             tasks.append({
                 "id": str(t.get("id")),
-                "type": str(t.get("type")),
-                "description": str(t.get("description", "")),
-                "uses_service": (t.get("resource") in ("API", "MCP", "AI能力", "RAG")),
-                "service": t.get("service"),
-                "resource": (t.get("resource") if t.get("resource") in ("API", "MCP", "AI能力", "RAG") else None),
+                "type": node_type if node_type else (resource or category or ""),
+                "description": desc,
+                "uses_service": uses_service,
+                "service": service,
+                "resource": resource,
+                "nodeType": node_type,
             })
         except Exception:
             continue
@@ -100,13 +105,20 @@ def call_llm_refine(user_requirement: str, caps: Dict[str, Any], feedback: str, 
     tasks: List[Dict[str, Any]] = []
     for t in raw_tasks:
         try:
+            category = str(t.get("type")) if t.get("type") is not None else ""
+            node_type = t.get("nodeType")
+            desc = str(t.get("description", ""))
+            resource = t.get("resource") if t.get("resource") in ("API", "MCP", "AI能力", "RAG") else None
+            service = t.get("service")
+            uses_service = (category == "service") and (resource in ("API", "MCP", "AI能力", "RAG"))
             tasks.append({
                 "id": str(t.get("id")),
-                "type": str(t.get("type")),
-                "description": str(t.get("description", "")),
-                # "uses_service": (t.get("resource") in ("API", "MCP", "AI能力", "RAG")),
-                # "service": t.get("service"),
-                # "resource": (t.get("resource") if t.get("resource") in ("API", "MCP", "AI能力", "RAG") else None),
+                "type": node_type if node_type else (resource or category or ""),
+                "description": desc,
+                "uses_service": uses_service,
+                "service": service,
+                "resource": resource,
+                "nodeType": node_type,
             })
         except Exception:
             continue
@@ -139,7 +151,8 @@ def _render_plan_text(tasks: List[Dict[str, Any]], description: Optional[str]) -
         lines.append(f"规划概述：{description}")
     lines.append("执行步骤：")
     for i, t in enumerate(tasks, start=1):
-        base = f"{i}. {t.get('description', '')}（节点类型：{t.get('type', '')}）"
+        show_type = t.get('nodeType') or t.get('type') or (t.get('resource') or '')
+        base = f"{i}. {t.get('description', '')}（节点类型：{show_type}）"
         # TODO 暂时不用附加服务
         # res = t.get("resource")
         # if t.get("uses_service") and res:
@@ -170,7 +183,8 @@ def node_split(state: AgentState) -> AgentState:
             "id": t.get("id") or f"task-{len(raw_tasks)+1}",
             "description": t.get("description") or "",
             "service": t.get("service"),
-            "resource": t.get("resource"),  # 仅作为提示，不直接确定类型
+            "resource": t.get("resource"),
+            "nodeType": t.get("nodeType"),
         })
 
     # 进行节点匹配与赋型
@@ -183,7 +197,7 @@ def node_split(state: AgentState) -> AgentState:
 
     # 评审：检查任务是否可由单节点完成、资源字段是否一致等
     review_notes = []
-    allowed_types = {"Prompt节点", "脚本节点", "循环节点", "RAG节点", "API节点", "AI能力节点", "MCP节点"}
+    allowed_types = {"Prompt节点", "脚本节点", "循环节点", "RAG节点", "API节点", "AI能力节点", "MCP节点", "输入节点", "输出节点"}
     for t in tasks:
         t_type = t.get("type")
         if t_type not in allowed_types:
@@ -210,7 +224,6 @@ def node_split(state: AgentState) -> AgentState:
         "prompt_for_confirmation": prompt,
         "confirmed": state.get("confirmed", False),
         "status": "await_confirmation" if not state.get("confirmed") else "confirmed",
-        "review_notes": review_notes,
     })
     log_event("agent", "node_split", {"phase": "end", "task_count": len(tasks), "has_review": bool(review_notes)})
     return state
@@ -241,7 +254,6 @@ def node_check_subs(state: AgentState) -> AgentState:
     """图节点：校验应用内订阅并标记缺失服务。"""
     log_event("agent", "node_check_subs", {"phase": "start"})
     in_app = get_in_app_subscriptions()
-    state["in_app_services"] = in_app
 
     # 仅对三方服务生态的子任务进行订阅校验
     required: List[Dict[str, Any]] = []
@@ -330,7 +342,7 @@ def _generate_node_metadata_local(subtask: Dict[str, Any]) -> Dict[str, Any]:
         "required": ["id", "type", "name", "description", "config", "inputs", "outputs", "depends_on"],
         "properties": {
             "id": {"type": "string"},
-            "type": {"type": "string", "enum": ["Prompt", "脚本", "循环", "RAG", "API", "AI能力", "MCP"]},
+        "type": {"type": "string", "enum": ["Prompt", "脚本", "循环", "RAG", "API", "AI能力", "MCP", "输入节点", "输出节点"]},
             "name": {"type": "string"},
             "description": {"type": "string"},
             "resource": {"type": "string", "enum": ["API", "MCP", "AI能力", "RAG"]},
@@ -443,11 +455,11 @@ def create_app():
 使用说明（简要）：
 
 1) 启动工具路由服务（开发环境）
-   uvicorn server:app --reload
+   uvicorn src.tool.server:app --reload
 
 2) 在 Python 中驱动流程：
 
-   from agent import create_app
+   from src.agent import create_app
    app = create_app()
 
    thread_id = "demo-thread"  # 任意字符串，标识一次工作流会话

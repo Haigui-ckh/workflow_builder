@@ -7,13 +7,15 @@ def parse_node_capabilities(node_desc_path: Optional[str] = None) -> Dict[str, A
     path = Path(node_desc_path or (Path.cwd() / "node_desc.txt"))
     # 基础能力映射（用于类型匹配与资源判断）
     base_caps: Dict[str, Any] = {
-        "Prompt节点": {"category": "即时可用能力"},
-        "脚本节点": {"category": "即时可用能力"},
-        "循环节点": {"category": "即时可用能力"},
-        "RAG节点": {"category": "三方服务生态", "resource": "RAG"},
-        "API节点": {"category": "三方服务生态", "resource": "API"},
-        "AI能力节点": {"category": "三方服务生态", "resource": "AI能力"},
-        "MCP节点": {"category": "三方服务生态", "resource": "MCP"},
+        "输入节点": {"type": "base"},
+        "输出节点": {"type": "base"},
+        "Prompt节点": {"type": "platform"},
+        "脚本节点": {"type": "platform"},
+        "循环节点": {"type": "platform"},
+        "RAG节点": {"type": "service"},
+        "API节点": {"type": "service"},
+        "AI能力节点": {"type": "service"},
+        "MCP节点": {"type": "service"},
     }
     if path.exists():
         raw = path.read_text(encoding="utf-8")

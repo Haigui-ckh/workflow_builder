@@ -89,7 +89,7 @@ app = FastAPI(title="Workflow Builder Tools", version="0.1.0")
 
 def _mock_path(*segments: str) -> str:
     base_dir = os.path.dirname(__file__)
-    return os.path.join(base_dir, "mock_data", *segments)
+    return os.path.join(base_dir, "../../mock_data", *segments)
 
 
 def _load_json_file(path: str, default):
@@ -283,11 +283,7 @@ def build_graph(req: BuildGraphRequest) -> BuildGraphResponse:
 
 # -------------------- LLM 子任务拆分（占位） --------------------
 
-class LLMSplitRequest(BaseModel):
-    user_requirement: str
-    node_capabilities: Dict[str, Any]
-    system_prompt: Optional[str] = None
-    user_prompt: Optional[str] = None
+ 
 
 
 class LLMSplitResponse(BaseModel):
@@ -368,34 +364,6 @@ def llm_refine_subtasks(req: LLMSplitRefineRequest) -> LLMSplitResponse:
     log_event("server", "route_end", {"path": "/tools/llm/refine_subtasks", "task_count": len(tasks)})
     return resp
 
-
-# ------------------- LLM 子任务拆分（占位） -------------------
-
-class SplitTasksRequest(BaseModel):
-    user_requirement: str
-    node_caps: Dict[str, Any]
-    system_prompt: Optional[str] = None
-    user_prompt: Optional[str] = None
-
-
-class SplitTasksResponse(BaseModel):
-    tasks: List[Subtask]
-    description: str
-    prompt_for_confirmation: str
-
-
-@app.post("/tools/llm/split_tasks", response_model=SplitTasksResponse)
-def llm_split_tasks(req: SplitTasksRequest) -> SplitTasksResponse:
-    # TODO: 调用大模型根据用户需求与节点能力进行任务拆分
-    # 这里返回空列表，Agent 端将回退到规则拆分
-    log_event("server", "route_start", {"path": "/tools/llm/split_tasks"})
-    resp = SplitTasksResponse(
-        tasks=[],
-        description="",
-        prompt_for_confirmation=""
-    )
-    log_event("server", "route_end", {"path": "/tools/llm/split_tasks", "task_count": 0})
-    return resp
 
 # ------------------- LLM 流程决策（占位） -------------------
 
