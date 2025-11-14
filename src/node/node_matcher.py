@@ -1,6 +1,6 @@
 from typing import Dict, Any, List, Optional, Tuple
 
-from utils.logger import log_event
+from src.utils.logger import log_event
 
 
 # 关键词特征，用于规则打分（可按需扩展）

@@ -4,10 +4,10 @@ import os
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, ValidationError
-from llm_client import chat, build_messages, safe_json_parse, is_configured
+from src.model.llm_client import chat, build_messages, safe_json_parse, is_configured
 import json
-from utils.logger import log_event
-from prompts import (
+from src.utils.logger import log_event
+from src.model.prompts import (
     SYSTEM_METADATA_PROMPT,
     build_metadata_user_prompt,
     build_metadata_correction_prompt,
@@ -296,67 +296,6 @@ class LLMSplitResponse(BaseModel):
     prompt_for_confirmation: Optional[str] = None
     plan_text: Optional[str] = None
 
-
-@app.post("/tools/llm/split_subtasks", response_model=LLMSplitResponse)
-def llm_split_subtasks(req: LLMSplitRequest) -> LLMSplitResponse:
-    # 若未配置 LLM，返回空结果以触发 Agent 兜底规则拆分
-    log_event("server", "route_start", {"path": "/tools/llm/split_subtasks"})
-    if not is_configured():
-        log_event("server", "llm_unconfigured", {"path": "/tools/llm/split_subtasks"})
-        return LLMSplitResponse(tasks=[], description=None, prompt_for_confirmation=None)
-
-    # 默认简洁系统提示与用户提示（若未传入）
-    system = req.system_prompt or (
-        "你是任务拆分专家。请将用户需求拆分为若干子任务，"
-        "每个子任务对应单个节点能力（Prompt、脚本、循环、RAG、API、AI能力、MCP）。"
-    )
-    user = req.user_prompt or (
-        f"用户需求：{req.user_requirement}\n"
-        f"节点能力：{json.dumps(req.node_capabilities, ensure_ascii=False)}\n"
-        "请输出 JSON：{tasks:[{id,type,description,resource?,service?}]，description，prompt_for_confirmation}"
-    )
-
-    content = chat(build_messages(system, user), response_format_json=True)
-    data = safe_json_parse(content) or {}
-
-    # 提取 tasks，映射到响应模型
-    raw_tasks = data.get("tasks") or []
-    tasks: List[Subtask] = []
-    for t in raw_tasks:
-        try:
-            tasks.append(Subtask(
-                id=str(t.get("id")),
-                type=str(t.get("type")),
-                description=str(t.get("description", "")),
-                uses_service=(t.get("resource") in ("API", "MCP", "AI能力", "RAG")),
-                service=t.get("service"),
-                resource=(t.get("resource") if t.get("resource") in ("API", "MCP", "AI能力", "RAG") else None),
-            ))
-        except Exception:
-            continue
-
-    desc = data.get("description")
-    prompt = data.get("prompt_for_confirmation")
-    # 服务端渲染自然语言规划
-    def render_plan_text(tasks: List[Subtask], description: Optional[str]) -> str:
-        lines = []
-        if description:
-            lines.append(f"规划概述：{description}")
-        lines.append("执行步骤：")
-        for i, t in enumerate(tasks, start=1):
-            base = f"{i}. {t.description}（节点类型：{t.type}）"
-            if t.uses_service and t.resource:
-                svc = f"；使用服务：{t.resource}{' - ' + t.service if t.service else ''}"
-                base += svc
-            lines.append(base)
-        return "\n".join(lines)
-
-    plan_text = render_plan_text(tasks, desc) if tasks else None
-    resp = LLMSplitResponse(tasks=tasks, description=desc, prompt_for_confirmation=prompt, plan_text=plan_text)
-    log_event("server", "route_end", {"path": "/tools/llm/split_subtasks", "task_count": len(tasks)})
-    return resp
-
-
 # -------------------- LLM 拆分改写（依据用户反馈） --------------------
 
 class LLMSplitRefineRequest(BaseModel):
@@ -382,7 +321,7 @@ def llm_refine_subtasks(req: LLMSplitRefineRequest) -> LLMSplitResponse:
     previous = req.previous_tasks or []
     caps_summary = json.dumps(req.node_capabilities, ensure_ascii=False)
     # 构建用户提示：需求 + 能力摘要 + 现有拆分 + 反馈
-    from prompts import build_refine_split_user_prompt
+    from src.model.prompts import build_refine_split_user_prompt
     user = req.user_prompt or build_refine_split_user_prompt(
         req.user_requirement,
         caps_summary,

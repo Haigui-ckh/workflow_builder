@@ -27,15 +27,36 @@
 # 输出
 1. 严格按照JSON格式进行输出，每个子任务作为一个条目列出。
 2. 子任务的描述应直接针对用户的需求，避免不必要的复杂性。
-3. 严格输出如下格式的JSON
-    {tasks:[{"description": "任务描述","type": "platform", "node": "Prompt"}],description,prompt_for_confirmation}
+3. 严格输出如下格式的JSON, 
+    {tasks:[{"description": "任务描述","type": "platform", "node": "Prompt节点"}]}
+4. JSON规则：
+  - type必须为节点分类platform/service/base的其中之一
+  - node为节点名称，如Prompt节点，输入节点
 
 # 示例
 Q: 我需要为流水线平台搭建一个智能运营机器人，能够查询“流水线运营”知识库，并结合大模型回答用户问题
-A: 
-[
-  "接收用户问题",
-  "查询流水线运营知识库并召回文档片段",
-  "调用大模型结合知识库召回片段生成问题回答"，
-  “输出生成的回答",
-]
+A:
+{
+  tasks:[
+    {
+      "description": "接收用户问题",
+      "type": "base",
+      "node": "输入节点"
+    },
+    {
+      "description": "查询流水线运营知识库并召回文档片段",
+      "type": "service",
+      "node": "RAG节点"
+    },
+    {
+      "description": "调用大模型结合知识库召回片段生成问题回答",
+      "type": "platform",
+      "node": "Prompt节点"
+    },
+    {
+      "description": "“输出生成的回答",
+      "type": "base",
+      "node": "输出节点"
+    },
+  ]
+} 

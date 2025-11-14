@@ -49,20 +49,6 @@ def call_build_graph(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
     res = _post(f"{TOOLS_BASE_URL}/tools/node/build_graph", data)
     return res.get("graph", {})
 
-
-def call_llm_split_subtasks(user_requirement: str, node_capabilities: Dict[str, Any], system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-    payload = {
-        "user_requirement": user_requirement,
-        "node_capabilities": node_capabilities,
-        "system_prompt": system_prompt,
-        "user_prompt": user_prompt,
-    }
-    try:
-        return _post(f"{TOOLS_BASE_URL}/tools/llm/split_subtasks", payload)
-    except Exception:
-        return {"tasks": [], "description": "", "prompt_for_confirmation": ""}
-
-
 def call_llm_decide(allowed_steps: List[str], state_summary: str, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
     payload = {
         "allowed_steps": allowed_steps,

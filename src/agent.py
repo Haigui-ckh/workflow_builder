@@ -2,17 +2,17 @@ import os
 import json
 from typing import TypedDict, List, Dict, Any, Optional
 
-from server import (
+from src.tool.server import (
     get_in_app_subscriptions,
     market_search,
     market_service_info,
     NodeMetadataModel,
 )
-from node_caps import parse_node_capabilities
-from node_matcher import assign_nodes_to_tasks
+from src.node.node_caps import parse_node_capabilities
+from src.node.node_matcher import assign_nodes_to_tasks
 from langgraph.graph import StateGraph, END
-from utils.logger import log_event
-from prompts import (
+from src.utils.logger import log_event
+from src.model.prompts import (
     SYSTEM_CONTROLLER_PROMPT,
     SYSTEM_SPLIT_PROMPT,
     build_split_user_prompt,
@@ -39,49 +39,6 @@ class AgentState(TypedDict, total=False):
     node_desc_path: Optional[str]
 
 
-# ---------------------- 拆分与节点能力 ----------------------
-
-
-def split_subtasks(user_requirement: str, caps: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """规则兜底拆分：根据用户需求与节点能力生成基础子任务列表。"""
-    # 规则化拆分（兜底，当 LLM 拆分失败或无结果时使用）
-    tasks: List[Dict[str, Any]] = []
-    req = user_requirement.lower()
-    idx = 1
-
-    def add_task(node_type: str, desc: str, uses_service: bool = False, resource: Optional[str] = None):
-        nonlocal idx
-        task = {
-            "id": f"task-{idx}",
-            "type": node_type,
-            "description": desc,
-            "uses_service": uses_service,
-            "resource": resource,
-        }
-        idx += 1
-        tasks.append(task)
-
-    if any(k in req for k in ["知识库", "检索", "rag"]):
-        add_task("RAG节点", "检索相关知识库文档片段", uses_service=True, resource="RAG")
-
-    if any(k in req for k in ["接口", "api", "调用", "对接"]):
-        add_task("API节点", "调用外部 API 完成业务逻辑", uses_service=True, resource="API")
-
-    if any(k in req for k in ["识别", "解析", "ocr", "图片", "语音"]):
-        add_task("AI能力节点", "使用官方 AI 能力处理文件/图像/语音", uses_service=True, resource="AI能力")
-
-    if any(k in req for k in ["mcp", "git", "文件系统", "解析器"]):
-        add_task("MCP节点", "通过 MCP 接入外部工具生态", uses_service=True, resource="MCP")
-
-    if any(k in req for k in ["循环", "批量", "列表", "重复"]):
-        add_task("循环节点", "对输入数组执行重复任务", uses_service=False)
-
-    # 默认加入 Prompt 生成描述环节
-    add_task("Prompt节点", "汇总上下文并生成最终文本结果", uses_service=False)
-
-    return tasks
-
-
 # ---------------------- 图节点函数 ----------------------
 # 拆分策略 
 # 1. 对于需要三方服务的，标识三方服务 ；2. 对于不需要三方服务的，直接标识节点
@@ -94,7 +51,7 @@ def split_subtasks(user_requirement: str, caps: Dict[str, Any]) -> List[Dict[str
 # 后续三方服务: 先进行工具检索 然后 大模型匹配工具到任务 生成完整的任务拆分数据
 def call_llm_split(user_requirement: str, caps: Dict[str, Any]) -> Dict[str, Any]:
     """调用大模型进行任务拆分并返回结构化结果。"""
-    from llm_client import chat, build_messages, safe_json_parse, is_configured
+    from src.model.llm_client import chat, build_messages, safe_json_parse, is_configured
     if not is_configured():
         return {"tasks": [], "description": None, "prompt_for_confirmation": None}
     system = SYSTEM_SPLIT_PROMPT or (
@@ -107,6 +64,7 @@ def call_llm_split(user_requirement: str, caps: Dict[str, Any]) -> Dict[str, Any
     data = safe_json_parse(content) or {}
     raw_tasks = data.get("tasks") or []
     tasks: List[Dict[str, Any]] = []
+    # print("llm generate tasks",raw_tasks)
     for t in raw_tasks:
         try:
             tasks.append({
@@ -119,16 +77,15 @@ def call_llm_split(user_requirement: str, caps: Dict[str, Any]) -> Dict[str, Any
             })
         except Exception:
             continue
-    print("llm split tasks",tasks)
     desc = data.get("description")
-    prompt = data.get("prompt_for_confirmation")
+    prompt_for_confirmation = data.get("prompt_for_confirmation")
     plan_text = _render_plan_text(tasks, desc) if tasks else None
-    return {"tasks": tasks, "description": desc, "prompt_for_confirmation": prompt, "plan_text": plan_text}
+    return {"tasks": tasks, "description": desc, "prompt_for_confirmation": prompt_for_confirmation, "plan_text": plan_text}
 
 def call_llm_refine(user_requirement: str, caps: Dict[str, Any], feedback: str, previous_tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
     """根据用户反馈调用大模型改写已有拆分结果。"""
-    from llm_client import chat, build_messages, safe_json_parse, is_configured
-    from prompts import build_refine_split_user_prompt
+    from src.model.llm_client import chat, build_messages, safe_json_parse, is_configured
+    from src.model.prompts import build_refine_split_user_prompt
     if not is_configured():
         return {"tasks": [], "description": None, "prompt_for_confirmation": None}
     system = SYSTEM_SPLIT_PROMPT or (
@@ -147,9 +104,9 @@ def call_llm_refine(user_requirement: str, caps: Dict[str, Any], feedback: str, 
                 "id": str(t.get("id")),
                 "type": str(t.get("type")),
                 "description": str(t.get("description", "")),
-                "uses_service": (t.get("resource") in ("API", "MCP", "AI能力", "RAG")),
-                "service": t.get("service"),
-                "resource": (t.get("resource") if t.get("resource") in ("API", "MCP", "AI能力", "RAG") else None),
+                # "uses_service": (t.get("resource") in ("API", "MCP", "AI能力", "RAG")),
+                # "service": t.get("service"),
+                # "resource": (t.get("resource") if t.get("resource") in ("API", "MCP", "AI能力", "RAG") else None),
             })
         except Exception:
             continue
@@ -160,7 +117,7 @@ def call_llm_refine(user_requirement: str, caps: Dict[str, Any], feedback: str, 
 
 def call_llm_decide_next(state: Dict[str, Any], allowed_steps: List[str]) -> Optional[str]:
     """调用大模型在候选步骤中选择下一步。"""
-    from llm_client import chat, build_messages, safe_json_parse, is_configured
+    from src.model.llm_client import chat, build_messages, safe_json_parse, is_configured
     if not is_configured():
         return None
     system = SYSTEM_CONTROLLER_PROMPT or (
@@ -183,10 +140,11 @@ def _render_plan_text(tasks: List[Dict[str, Any]], description: Optional[str]) -
     lines.append("执行步骤：")
     for i, t in enumerate(tasks, start=1):
         base = f"{i}. {t.get('description', '')}（节点类型：{t.get('type', '')}）"
-        res = t.get("resource")
-        if t.get("uses_service") and res:
-            svc = f"；使用服务：{res}{' - ' + t.get('service') if t.get('service') else ''}"
-            base += svc
+        # TODO 暂时不用附加服务
+        # res = t.get("resource")
+        # if t.get("uses_service") and res:
+        #     svc = f"；使用服务：{res}{' - ' + t.get('service') if t.get('service') else ''}"
+        #     base += svc
         lines.append(base)
     return "\n".join(lines)
 
@@ -218,10 +176,6 @@ def node_split(state: AgentState) -> AgentState:
     # 进行节点匹配与赋型
     tasks: List[Dict[str, Any]] = assign_nodes_to_tasks(raw_tasks, caps) if raw_tasks else []
 
-    # 若 LLM 无结果或异常，回退到规则拆分（已带类型）
-    if not tasks:
-        tasks = split_subtasks(req_text, caps)
-
     # 描述与提示语：优先使用 LLM 返回
     desc = llm_res.get("description") or "根据用户需求拆分为可由单个节点完成的子任务（参考节点能力）"
     prompt = llm_res.get("prompt_for_confirmation") or "已完成子任务拆分。是否继续生成工作流？请确认（是/否）。"
@@ -234,14 +188,14 @@ def node_split(state: AgentState) -> AgentState:
         t_type = t.get("type")
         if t_type not in allowed_types:
             review_notes.append(f"未知节点类型：{t_type}")
-        res = t.get("resource")
-        uses_service = t.get("uses_service")
-        if uses_service and res not in ("API", "MCP", "AI能力", "RAG"):
-            review_notes.append(f"服务型子任务资源不合法：{res}（任务 {t.get('id')}）")
-        if not uses_service and res:
-            review_notes.append(f"非服务型子任务不应包含 resource：{res}（任务 {t.get('id')}）")
-        if uses_service and not t.get("service"):
-            review_notes.append(f"缺少服务名称：资源 {res}（任务 {t.get('id')}）")
+        # res = t.get("resource")
+        # uses_service = t.get("uses_service")
+        # if uses_service and res not in ("API", "MCP", "AI能力", "RAG"):
+        #     review_notes.append(f"服务型子任务资源不合法：{res}（任务 {t.get('id')}）")
+        # if not uses_service and res:
+        #     review_notes.append(f"非服务型子任务不应包含 resource：{res}（任务 {t.get('id')}）")
+        # if uses_service and not t.get("service"):
+        #     review_notes.append(f"缺少服务名称：资源 {res}（任务 {t.get('id')}）")
 
     if review_notes:
         desc = f"{desc}\n评审提示：\n- " + "\n- ".join(review_notes)
@@ -369,8 +323,8 @@ def node_build_graph(state: AgentState) -> AgentState:
 
 def _generate_node_metadata_local(subtask: Dict[str, Any]) -> Dict[str, Any]:
     """在本地调用大模型生成并校验单个节点元数据。"""
-    from llm_client import chat, build_messages, safe_json_parse, is_configured
-    from prompts import SYSTEM_METADATA_PROMPT, build_metadata_user_prompt, build_metadata_correction_prompt
+    from src.model.llm_client import chat, build_messages, safe_json_parse, is_configured
+    from src.model.prompts import SYSTEM_METADATA_PROMPT, build_metadata_user_prompt, build_metadata_correction_prompt
     json_schema = {
         "type": "object",
         "required": ["id", "type", "name", "description", "config", "inputs", "outputs", "depends_on"],
@@ -501,7 +455,7 @@ def create_app():
    state = app.invoke({
        "user_requirement": "请对上传的产品清单进行统一查询，并输出摘要报告",
        "confirmed": False,
-       "node_desc_path": "./node_desc.txt",
+       "node_desc_path": "../templates/node/node_desc.txt",
    }, config={"configurable": {"thread_id": thread_id}})
    print(state["prompt_for_confirmation"])  # 展示确认提示
 

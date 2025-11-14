@@ -15,7 +15,7 @@ SYSTEM_SPLIT_PROMPT = (
 
 def build_split_user_prompt(requirement: str, caps_summary: str) -> str:
     base_dir = os.path.dirname(__file__)
-    path = os.path.join(base_dir, "templates", "prompts", "split_user_prompt.txt")
+    path = os.path.join(base_dir, "../../templates", "prompts", "split_user_prompt.txt")
     try:
         with open(path, "r", encoding="utf-8") as f:
             tpl = f.read()
