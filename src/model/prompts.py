@@ -12,6 +12,11 @@ SYSTEM_SPLIT_PROMPT = (
     "只输出 json，不要任何额外文本。"
 )
 
+SYSTEM_FEEDBACK_DECIDE_PROMPT = (
+    "你是任务拆分评审器。根据用户输入判断是继续执行还是修改拆分。"
+    "只输出 json 对象，包含 action 与 rationale。action 必须为 apply_refine 或 continue。"
+)
+
 
 def build_split_user_prompt(requirement: str, caps_summary: str) -> str:
     base_dir = os.path.dirname(__file__)
@@ -57,6 +62,19 @@ def summarize_state(state: dict) -> str:
     return (
         f"status={status}, confirmed={confirmed}, "
         f"tasks={len(tasks)}, missing_services={len(missing)}"
+    )
+
+def build_feedback_decide_user_prompt(feedback: str, tasks: list[dict], caps_summary: str, allowed_actions: list[str]) -> str:
+    import json
+    return (
+        "用户输入:\n"
+        + (feedback or "")
+        + "\n当前拆分任务:\n"
+        + json.dumps(tasks or [], ensure_ascii=False)
+        + "\n节点能力摘要:\n"
+        + (caps_summary or "")
+        + "\n输出为 json：{action,rationale}，其中 action 必须为 "
+        + ", ".join(allowed_actions or ["apply_refine", "continue"])
     )
 
 

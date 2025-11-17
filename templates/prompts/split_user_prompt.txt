@@ -38,8 +38,8 @@
      ]
    }
 4. 规则：
-   - 当type为platform或base：必须输出nodeType，且不要输出resource。
-   - 当type为service：必须输出resource；不要输出nodeType；如能确定具体服务可输出service。
+   - 当type为platform或base：必须输出nodeType
+   - 当type为service：不要输出nodeType
 
 # 示例
 Q: 我需要为流水线平台搭建一个智能运营机器人，能够查询“流水线运营”知识库，并结合大模型回答用户问题
@@ -49,7 +49,7 @@ A:
     {
       "description": "接收用户问题",
       "type": "base",
-      "node": "INPUT"
+      "nodeType": "INPUT"
     },
     {
       "description": "查询流水线运营知识库并召回文档片段",
@@ -58,12 +58,12 @@ A:
     {
       "description": "调用大模型结合知识库召回片段生成问题回答",
       "type": "platform",
-      "node": "PROMPT"
+      "nodeType": "PROMPT"
     },
     {
       "description": "“输出生成的回答",
       "type": "base",
-      "node": "OUTPUT"
+      "nodeType": "OUTPUT"
     },
   ]
 } 

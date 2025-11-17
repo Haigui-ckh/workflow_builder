@@ -11,6 +11,7 @@ from src.tool.server import (
 from src.node.node_caps import parse_node_capabilities
 from src.node.node_matcher import assign_nodes_to_tasks
 from langgraph.graph import StateGraph, END
+from langgraph.types import interrupt, Command
 from src.utils.logger import log_event
 from src.model.prompts import (
     SYSTEM_CONTROLLER_PROMPT,
@@ -19,6 +20,8 @@ from src.model.prompts import (
     summarize_caps,
     build_decide_user_prompt,
     summarize_state,
+    SYSTEM_FEEDBACK_DECIDE_PROMPT,
+    build_feedback_decide_user_prompt,
 )
 
 
@@ -65,19 +68,15 @@ def call_llm_split(user_requirement: str, caps: Dict[str, Any]) -> Dict[str, Any
     tasks: List[Dict[str, Any]] = []
     for t in raw_tasks:
         try:
-            category = str(t.get("type")) if t.get("type") is not None else ""
+            # category = str(t.get("type")) if t.get("type") is not None else ""
             node_type = t.get("nodeType")
             desc = str(t.get("description", ""))
-            resource = t.get("resource") if t.get("resource") in ("API", "MCP", "AI能力", "RAG") else None
-            service = t.get("service")
-            uses_service = (category == "service") and (resource in ("API", "MCP", "AI能力", "RAG"))
+            # service = t.get("service")
             tasks.append({
                 "id": str(t.get("id")),
-                "type": node_type if node_type else (resource or category or ""),
+                "type": node_type,
                 "description": desc,
-                "uses_service": uses_service,
-                "service": service,
-                "resource": resource,
+                # "service": service,
                 "nodeType": node_type,
             })
         except Exception:
@@ -86,6 +85,25 @@ def call_llm_split(user_requirement: str, caps: Dict[str, Any]) -> Dict[str, Any
     prompt_for_confirmation = data.get("prompt_for_confirmation")
     plan_text = _render_plan_text(tasks, desc) if tasks else None
     return {"tasks": tasks, "description": desc, "prompt_for_confirmation": prompt_for_confirmation, "plan_text": plan_text}
+
+def call_llm_decide_feedback(feedback: str, caps: Dict[str, Any], previous_tasks: List[Dict[str, Any]]) -> Optional[str]:
+    from src.model.llm_client import chat, build_messages, safe_json_parse, is_configured
+    if not feedback:
+        return None
+    allowed = ["apply_refine", "continue"]
+    if not is_configured():
+        f = feedback.lower()
+        if any(k in f for k in ["改", "替换", "增加", "新增", "修改", "不满意", "重做", "调整", "换", "删", "change", "modify", "replace", "add", "update", "adjust", "redo", "remove", "delete"]):
+            return "apply_refine"
+        if any(k in f for k in ["确认", "继续", "同意", "可以", "ok", "好的", "yes", "y", "go on", "proceed"]):
+            return "continue"
+        return "continue"
+    caps_summary = summarize_caps(caps)
+    user = build_feedback_decide_user_prompt(feedback, previous_tasks or [], caps_summary, allowed)
+    content = chat(build_messages(SYSTEM_FEEDBACK_DECIDE_PROMPT, user), response_format_json=True)
+    data = safe_json_parse(content) or {}
+    action = data.get("action")
+    return action if action in allowed else "continue"
 
 def call_llm_refine(user_requirement: str, caps: Dict[str, Any], feedback: str, previous_tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
     """根据用户反馈调用大模型改写已有拆分结果。"""
@@ -105,19 +123,12 @@ def call_llm_refine(user_requirement: str, caps: Dict[str, Any], feedback: str, 
     tasks: List[Dict[str, Any]] = []
     for t in raw_tasks:
         try:
-            category = str(t.get("type")) if t.get("type") is not None else ""
             node_type = t.get("nodeType")
             desc = str(t.get("description", ""))
-            resource = t.get("resource") if t.get("resource") in ("API", "MCP", "AI能力", "RAG") else None
-            service = t.get("service")
-            uses_service = (category == "service") and (resource in ("API", "MCP", "AI能力", "RAG"))
             tasks.append({
                 "id": str(t.get("id")),
-                "type": node_type if node_type else (resource or category or ""),
+                "type": node_type,
                 "description": desc,
-                "uses_service": uses_service,
-                "service": service,
-                "resource": resource,
                 "nodeType": node_type,
             })
         except Exception:
@@ -151,7 +162,7 @@ def _render_plan_text(tasks: List[Dict[str, Any]], description: Optional[str]) -
         lines.append(f"规划概述：{description}")
     lines.append("执行步骤：")
     for i, t in enumerate(tasks, start=1):
-        show_type = t.get('nodeType') or t.get('type') or (t.get('resource') or '')
+        show_type = t.get('nodeType') or t.get('type')
         base = f"{i}. {t.get('description', '')}（节点类型：{show_type}）"
         # TODO 暂时不用附加服务
         # res = t.get("resource")
@@ -175,15 +186,13 @@ def node_split(state: AgentState) -> AgentState:
     else:
         llm_res = call_llm_split(req_text, caps)
     llm_tasks = llm_res.get("tasks") or []
-
+    print("llm_tasks:", llm_tasks)
     # 规范化为“无偏节点”的子任务结构，仅保留描述/资源提示/服务线索
     raw_tasks: List[Dict[str, Any]] = []
     for t in llm_tasks:
         raw_tasks.append({
             "id": t.get("id") or f"task-{len(raw_tasks)+1}",
             "description": t.get("description") or "",
-            "service": t.get("service"),
-            "resource": t.get("resource"),
             "nodeType": t.get("nodeType"),
         })
 
@@ -202,14 +211,6 @@ def node_split(state: AgentState) -> AgentState:
         t_type = t.get("type")
         if t_type not in allowed_types:
             review_notes.append(f"未知节点类型：{t_type}")
-        # res = t.get("resource")
-        # uses_service = t.get("uses_service")
-        # if uses_service and res not in ("API", "MCP", "AI能力", "RAG"):
-        #     review_notes.append(f"服务型子任务资源不合法：{res}（任务 {t.get('id')}）")
-        # if not uses_service and res:
-        #     review_notes.append(f"非服务型子任务不应包含 resource：{res}（任务 {t.get('id')}）")
-        # if uses_service and not t.get("service"):
-        #     review_notes.append(f"缺少服务名称：资源 {res}（任务 {t.get('id')}）")
 
     if review_notes:
         desc = f"{desc}\n评审提示：\n- " + "\n- ".join(review_notes)
@@ -230,21 +231,45 @@ def node_split(state: AgentState) -> AgentState:
 
 
 def should_continue_after_split(state: AgentState) -> str:
-    """拆分后决策：确定进入确认或订阅校验。"""
+    """任务拆分后决策：已改为固定进入暂停确认。"""
     log_event("agent", "decision_start", {"from": "split"})
-    decision = call_llm_decide_next(state, ["pause_confirmation", "check_subs"]) or ""
-    if decision in ("pause_confirmation", "check_subs"):
-        log_event("agent", "decision_llm", {"next": decision})
-        return decision
-    return "check_subs" if state.get("confirmed") else "pause_confirmation"
+    return "pause_confirmation"
 
 
 def node_pause_confirmation(state: AgentState) -> AgentState:
     """图节点：暂停等待用户对规划进行确认。"""
     log_event("agent", "node_pause_confirmation", {"phase": "start"})
-    state["status"] = "await_confirmation"
+    payload = {
+        "prompt_for_confirmation": state.get("prompt_for_confirmation"),
+        "plan_text": state.get("plan_text"),
+        "tasks": state.get("tasks"),
+        "status": "await_confirmation",
+    }
+    # 中断等待确认
+    value = interrupt(payload)
+    if isinstance(value, dict):
+        if value.get("confirmed") is True:
+            state["confirmed"] = True
+        if value.get("user_feedback"):
+            state["user_feedback"] = value.get("user_feedback")
+    state["status"] = "confirmed" if state.get("confirmed") else "await_confirmation"
     log_event("agent", "node_pause_confirmation", {"phase": "end"})
     return state
+
+def should_continue_after_pause(state: AgentState) -> str:
+    """暂停后根据用户输入决定是改写拆分还是继续下行。"""
+    log_event("agent", "decision_start", {"from": "pause_confirmation"})
+    fb = state.get("user_feedback") or ""
+    caps = parse_node_capabilities(state.get("node_desc_path"))
+    previous_tasks = state.get("tasks") or []
+    action = call_llm_decide_feedback(fb, caps, previous_tasks) if fb else None
+    if action == "apply_refine":
+        log_event("agent", "decision_llm", {"next": "refine"})
+        return "refine"
+    if state.get("confirmed"):
+        log_event("agent", "decision_user", {"next": "resume"})
+        return "resume"
+    return "refine" if fb else "resume"
 
 # 检索已订阅工具 --> 大模型匹配工具到任务
 # 工具使用优先级
@@ -253,22 +278,27 @@ def node_pause_confirmation(state: AgentState) -> AgentState:
 def node_check_subs(state: AgentState) -> AgentState:
     """图节点：校验应用内订阅并标记缺失服务。"""
     log_event("agent", "node_check_subs", {"phase": "start"})
+    # 针对工具数据构建 向量数据库
+    # DESC 应用内订阅服务列表
     in_app = get_in_app_subscriptions()
 
     # 仅对三方服务生态的子任务进行订阅校验
     required: List[Dict[str, Any]] = []
     for t in state.get("tasks", []):
-        res = t.get("resource")
-        if res in ("API", "MCP", "AI能力", "RAG"):
-            name = t.get("service") or t.get("type")
-            required.append({"name": name, "resource": res})
+        res = t.get("type")
+        if res == "service":
+            desc = t.get("description")
+            required.append({"desc": desc})
     state["required_services"] = required
-
-    names_in_app = {(s.get("name"), s.get("resource")) for s in in_app}
+    # 通过任务描述检索匹配工具
+    # 语义检索 --> 大模型生成
+    # TODO 向量数据库 && 检索
+    # 遍历每一个任务完成相似度检索
+    names_in_app = {(s.get("desc")) for s in in_app}
     missing: List[Dict[str, Any]] = []
     for need in required:
-        key = (need.get("name"), need.get("resource"))
-        if key not in names_in_app:
+        desc = need.get("desc")
+        if desc not in names_in_app:
             missing.append(need)
     state["missing_services"] = missing
     state["status"] = "subscriptions_ok" if not missing else "subscriptions_missing"
@@ -423,9 +453,10 @@ def create_app():
     graph.add_node("build_graph", node_build_graph)
 
     graph.set_entry_point("split")
-    graph.add_conditional_edges("split", should_continue_after_split, {
-        "pause_confirmation": "pause_confirmation",
-        "check_subs": "check_subs",
+    graph.add_edge("split", "pause_confirmation")
+    graph.add_conditional_edges("pause_confirmation", should_continue_after_pause, {
+        "refine": "split",
+        "resume": "check_subs",
     })
     graph.add_conditional_edges("check_subs", should_continue_after_check, {
         "search_market": "search_market",
@@ -443,9 +474,13 @@ def create_app():
         checkpointer = SQLiteSaver(db_path)
         log_event("agent", "checkpoint_sqlite", {"path": db_path})
     except Exception:
-        # 无法启用 SQLiteSaver 时，直接使用无检查点模式
-        checkpointer = None
-        log_event("agent", "checkpoint_disabled", {})
+        try:
+            from langgraph.checkpoint.memory import MemorySaver  # type: ignore
+            checkpointer = MemorySaver()
+            log_event("agent", "checkpoint_memory", checkpointer)
+        except Exception:
+            checkpointer = None
+            log_event("agent", "checkpoint_disabled", {})
 
     app = graph.compile(checkpointer=checkpointer)
     return app
